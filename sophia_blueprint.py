@@ -27,6 +27,8 @@ from pathlib import Path
 import requests
 from flask import Blueprint, jsonify, request, session
 
+from client_ip import resolve_client_ip
+
 sophia_bp = Blueprint("sophia", __name__)
 
 # --- Config (env-overridable; set the real endpoint in the service env, not here) ---
@@ -61,9 +63,8 @@ _ALLOWED_ORIGINS = set(
 
 
 def _client_ip():
-    """Return the caller's IP, preferring the first X-Forwarded-For hop over remote_addr."""
-    xff = request.headers.get("X-Forwarded-For", "")
-    return (xff.split(",")[0].strip() if xff else request.remote_addr) or "?"
+    """Return the caller's IP, honouring X-Forwarded-For only from a trusted proxy."""
+    return resolve_client_ip()
 
 
 # --- Training corpus: every Sophia conversation across ALL Elyan sites, tagged by site ---
