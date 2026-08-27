@@ -35,6 +35,11 @@ rtc_services_bp = Blueprint("rtc_services", __name__)
 # Service Catalog
 # ---------------------------------------------------------------------------
 
+# Upper bound on a single /api/rtc/pay purchase. Generous enough for any real
+# bulk buy (100 monthly passes = 6000 RTC) while keeping the cost arithmetic
+# well inside float range.
+MAX_PURCHASE_QUANTITY = 100
+
 SERVICE_CATALOG = {
     "pro_api_day": {
         "name": "Pro API Day Pass",
@@ -162,6 +167,14 @@ def init_service_tables(db_path):
 # ---------------------------------------------------------------------------
 
 def _get_agent(db):
+    """Get the authenticated agent from the X-API-Key request header.
+
+    Args:
+        db: SQLite database connection.
+
+    Returns:
+        Agent row dict if authenticated, None otherwise.
+    """
     """Get authenticated agent from X-API-Key header."""
     api_key = request.headers.get("X-API-Key", "")
     if not api_key:
@@ -221,7 +234,17 @@ def init_app(app, db_path):
 
         data = request.get_json(force=True, silent=True) or {}
         service_key = data.get("service_key", "")
-        quantity = int(data.get("quantity", 1))
+        # quantity is client-supplied and multiplies straight into the cost.
+        # A negative value flips `rtc_balance - total_cost` into a credit and
+        # sails past the balance check below, so bound it before it is used.
+        try:
+            quantity = int(data.get("quantity", 1))
+        except (TypeError, ValueError):
+            return jsonify({"error": "quantity must be an integer"}), 400
+        if quantity < 1 or quantity > MAX_PURCHASE_QUANTITY:
+            return jsonify({
+                "error": f"quantity must be between 1 and {MAX_PURCHASE_QUANTITY}",
+            }), 400
 
         if service_key not in SERVICE_CATALOG:
             return jsonify({
@@ -232,7 +255,10 @@ def init_app(app, db_path):
         svc = SERVICE_CATALOG[service_key]
         total_cost = svc["price_rtc"] * quantity
 
-        # Check balance
+        # Fast-fail on the balance we already read. This is only a courtesy
+        # check -- `agent` was SELECTed earlier in the request, so the value is
+        # already stale by the time we get here. The guarded UPDATE below is
+        # what actually enforces the balance.
         balance = agent["rtc_balance"]
         if balance < total_cost:
             return jsonify({
@@ -249,12 +275,34 @@ def init_app(app, db_path):
         now = time.time()
         expires_at = now + svc["token_ttl_sec"]
 
-        # Atomic debit + purchase record
+        # Atomic debit + purchase record.
+        #
+        # The debit MUST carry `AND rtc_balance >= ?` in its WHERE clause. The
+        # balance check above reads a row SELECTed earlier in the request, so
+        # two concurrent purchases both pass it and both subtract -- driving the
+        # balance negative (spend-more-than-you-have). Pushing the comparison
+        # into the UPDATE makes the read and the write one atomic statement;
+        # `rowcount == 0` then means "someone else got there first" and we
+        # roll back instead of minting RTC out of nothing.
         try:
-            db.execute(
-                "UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?",
-                (total_cost, agent["id"])
+            cur = db.execute(
+                "UPDATE agents SET rtc_balance = rtc_balance - ? "
+                "WHERE id = ? AND rtc_balance >= ?",
+                (total_cost, agent["id"], total_cost)
             )
+            if cur.rowcount == 0:
+                db.rollback()
+                fresh = db.execute(
+                    "SELECT rtc_balance FROM agents WHERE id = ?", (agent["id"],)
+                ).fetchone()
+                fresh_balance = fresh["rtc_balance"] if fresh else 0
+                return jsonify({
+                    "error": "Insufficient RTC balance",
+                    "balance": fresh_balance,
+                    "cost": total_cost,
+                    "need": round(total_cost - fresh_balance, 6),
+                    "hint": "Buy RTC from miners at /otc or earn through mining",
+                }), 402
             db.execute("""INSERT INTO service_purchases
                 (agent_id, service_key, quantity, amount_rtc, token_hash,
                  status, scope_json, uses_total, uses_remaining,

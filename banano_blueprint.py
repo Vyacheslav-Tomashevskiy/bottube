@@ -82,6 +82,11 @@ def get_db():
 
 
 def _request_json_object():
+    """Parse and return a JSON object from the request body.
+    
+    Returns:
+        The result value.
+    """
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return None, (jsonify({"error": "JSON object required"}), 400)
@@ -89,6 +94,14 @@ def _request_json_object():
 
 
 def _parse_positive_ban_amount(data):
+    """Parse positive ban amount from input.
+    
+    Args:
+        data: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     raw_amount = data.get("amount", 0)
     if isinstance(raw_amount, bool):
         return None, (jsonify({"error": "amount must be a finite positive number"}), 400)
@@ -102,6 +115,16 @@ def _parse_positive_ban_amount(data):
 
 
 def _json_text_field(data, name, default=""):
+    """Extract a JSON field from the request body.
+    
+    Args:
+        data: Parameter value.
+        name: Parameter value.
+        default: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     value = data.get(name, default)
     if value is None:
         value = default
@@ -530,10 +553,14 @@ def ban_tip():
     if recipient["id"] == user_id:
         return jsonify({"error": "Cannot tip yourself"}), 400
 
+    # Withdrawals are written as 'pending' and only ever advance to
+    # 'sent'/'failed' -- never 'credited'. Filtering on 'credited' alone
+    # dropped those rows before the CASE could subtract them, leaving
+    # already-withdrawn BAN tippable. Match ban_withdraw's status set.
     balance_row = db.execute(
         "SELECT COALESCE(SUM(CASE WHEN tx_type IN ('reward', 'tip_received') THEN amount_ban ELSE 0 END), 0) - "
         "COALESCE(SUM(CASE WHEN tx_type IN ('withdrawal', 'tip_sent') THEN amount_ban ELSE 0 END), 0) as balance "
-        "FROM ban_transactions WHERE agent_id = ? AND status = 'credited'",
+        "FROM ban_transactions WHERE agent_id = ? AND status IN ('credited', 'sent', 'pending')",
         (user_id,),
     ).fetchone()
     balance = balance_row["balance"] if balance_row else 0

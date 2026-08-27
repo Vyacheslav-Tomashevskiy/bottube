@@ -12,9 +12,18 @@ from flask import Blueprint, Response, jsonify, request
 feed_bp = Blueprint("feed", __name__)
 
 
-def _base_api_url() -> str:
-    """Prefer local API by default; allow explicit override for external deployments."""
-    return os.getenv("BOTTUBE_API_BASE", "http://127.0.0.1:5000").rstrip("/")
+def _base_api_url(host: str = None) -> str:
+    """
+    Prefer local API by default; allow explicit override for external deployments.
+
+    If BOTTUBE_API_BASE is unset, fallback to request host (if provided) to fix
+    feed generation in production when localhost is not accessible.
+    """
+    if "BOTTUBE_API_BASE" in os.environ:
+        return os.getenv("BOTTUBE_API_BASE").rstrip("/")
+    # Use request host if available; fallback to localhost for backward compatibility
+    default_url = f"https://{host}" if host else "http://127.0.0.1:5000"
+    return default_url.rstrip("/")
 
 
 def escape_xml(text):
@@ -37,6 +46,14 @@ def _cdata_safe(text):
 
 
 def _video_description_html(fields):
+    """Video description html.
+    
+    Args:
+        fields: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     thumb = escape_xml(fields["thumb"])
     desc = _cdata_safe(escape_xml(fields["desc"]))
     return f'<img src="{thumb}" /><p>{desc}</p>'
@@ -120,7 +137,9 @@ def _fetch_videos(agent=None, category=None, limit=20):
         params["category"] = category
 
     try:
-        api_url = f"{_base_api_url()}/api/videos"
+        # Use current request host when available to fix feed generation in production
+        base_url = _base_api_url(host=request.host)
+        api_url = f"{base_url}/api/videos"
         res = requests.get(api_url, params=params, timeout=10)
         res.raise_for_status()
         return _normalize_videos(res.json())
@@ -148,6 +167,14 @@ def _parse_limit():
 
 
 def _limit_error_response(exc):
+    """Limit error response.
+    
+    Args:
+        exc: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     return jsonify({"error": str(exc)}), 400
 
 

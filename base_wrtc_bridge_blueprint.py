@@ -166,6 +166,15 @@ def _finite_amount(value):
 
 
 def _parse_history_limit(default: int = 50, max_value: int = 200):
+    """Parse history limit from input.
+    
+    Args:
+        default: Parameter value.
+        max_value: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     raw_value = request.args.get("limit")
     if raw_value is None or raw_value == "":
         return default, None
@@ -510,10 +519,30 @@ def base_bridge_withdraw():
             now,
         ),
     )
-    db.execute(
-        "UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?",
-        (total_debit, agent["id"]),
+    # Guarded debit. `balance` above came from the row read at authentication
+    # time and is already stale; the per-agent cooldown narrows the race window
+    # but does not close it (the cooldown lookup is itself unsynchronized). The
+    # comparison lives in the UPDATE so read and write are one atomic statement;
+    # a rowcount of 0 rolls back the pending withdrawal row inserted above.
+    cur = db.execute(
+        "UPDATE agents SET rtc_balance = rtc_balance - ? "
+        "WHERE id = ? AND rtc_balance >= ?",
+        (total_debit, agent["id"], total_debit),
     )
+    if cur.rowcount == 0:
+        db.rollback()
+        fresh = db.execute(
+            "SELECT rtc_balance FROM agents WHERE id = ?", (agent["id"],)
+        ).fetchone()
+        return jsonify(
+            {
+                "error": "Insufficient RTC balance",
+                "balance": float(fresh["rtc_balance"] or 0.0) if fresh else 0.0,
+                "required": total_debit,
+                "amount": amount,
+                "fee": BASE_WITHDRAW_FEE,
+            }
+        ), 400
     db.commit()
 
     new_balance = db.execute(

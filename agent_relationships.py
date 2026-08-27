@@ -80,11 +80,33 @@ DRAMA_ARC_TEMPLATES = {
 # ---------------------------------------------------------------------------
 
 def _db_path() -> Path:
+    """Return the path to the SQLite database file.
+    
+    Returns:
+        The result value.
+    """
     try:
         import bottube_server  # type: ignore
         return Path(bottube_server.DB_PATH)
     except Exception:
         return Path(__file__).parent / "bottube.db"
+
+
+def _require_admin():
+    """Gate an admin-only endpoint using the main server's admin check.
+
+    Returns a Flask response (403) when the caller is not an admin, or
+    ``None`` when the request carries a valid ``X-Admin-Key``. Delegating to
+    ``bottube_server._require_admin`` keeps the admin secret and header
+    contract in one place instead of forking it here.
+    """
+    try:
+        import bottube_server  # type: ignore
+        return bottube_server._require_admin()
+    except Exception:
+        # If the main server module (and its admin key) is unavailable we must
+        # fail closed rather than silently allow the privileged action.
+        return jsonify({"error": "Forbidden"}), 403
 
 
 def get_db() -> sqlite3.Connection:
@@ -306,6 +328,14 @@ def list_relationships():
 
 @beef_bp.route("/relationships/<int:rel_id>", methods=["GET"])
 def get_relationship(rel_id: int):
+    """Retrieve relationship.
+    
+    Args:
+        rel_id: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     db = get_db()
     row = db.execute(
         "SELECT * FROM agent_relationships WHERE id=?", (rel_id,)
@@ -363,6 +393,9 @@ def create_or_update_relationship():
 @beef_bp.route("/relationships/<int:rel_id>/kill", methods=["POST"])
 def admin_kill(rel_id: int):
     """Admin kill switch — immediately deactivates a beef arc."""
+    err = _require_admin()
+    if err:
+        return err
     db = get_db()
     db.execute(
         "UPDATE agent_relationships SET is_killed=1, updated_at=? WHERE id=?",
@@ -378,6 +411,14 @@ def admin_kill(rel_id: int):
 
 @beef_bp.route("/relationships/<int:rel_id>/events", methods=["GET"])
 def get_events(rel_id: int):
+    """Retrieve events.
+    
+    Args:
+        rel_id: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     db = get_db()
     rows = db.execute(
         "SELECT * FROM relationship_events WHERE relationship_id=? ORDER BY created_at DESC",
@@ -393,6 +434,11 @@ def get_events(rel_id: int):
 
 @beef_bp.route("/arcs", methods=["GET"])
 def list_arcs():
+    """List arcs.
+    
+    Returns:
+        The result value.
+    """
     db = get_db()
     status = request.args.get("status", "active")
     rows = db.execute(
@@ -404,6 +450,11 @@ def list_arcs():
 
 @beef_bp.route("/arcs/templates", methods=["GET"])
 def arc_templates():
+    """Arc templates.
+    
+    Returns:
+        The result value.
+    """
     return jsonify(DRAMA_ARC_TEMPLATES)
 
 

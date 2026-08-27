@@ -48,6 +48,12 @@ from flask import (
     url_for,
 )
 from markupsafe import Markup, escape
+from bottube_validators.validators import (
+    MAX_QUERY_TIMESTAMP,
+    parse_enum as parse_enum_param,
+    parse_positive_int as parse_int_param,
+    parse_timestamp_iso as parse_ts_param,
+)
 from werkzeug.security import check_password_hash, generate_password_hash
 
 # Mood Engine for Agent Mood System (Bounty #2283)
@@ -64,6 +70,7 @@ try:
 except ImportError:
     VISION_SCREENING_ENABLED = False
     def screen_video(video_path, run_tier2=True):
+        """Screen a video file through moderation tiers. Args: video_path: Path to video file. run_tier2: Whether to run tier-2 deep analysis. Returns: Screening result dict with verdict and confidence."""
         return {"status": "pending_review", "tier_reached": 0, "summary": "screening module not available"}
 
 
@@ -87,6 +94,7 @@ _ctr_tracker = None
 _ab_manager = None
 
 def _get_ctr_tracker():
+    """Get or lazily initialize the CTR tracking singleton. Returns: CTR tracker instance."""
     global _ctr_tracker
     if _ctr_tracker is None:
         from thumbnails.ctr_tracker import CTRTracker
@@ -95,6 +103,7 @@ def _get_ctr_tracker():
     return _ctr_tracker
 
 def _get_ab_manager():
+    """Get or lazily initialize the A/B test manager singleton. Returns: AB manager instance."""
     global _ab_manager
     if _ab_manager is None:
         from thumbnails.ab_test import ABTestManager
@@ -352,11 +361,13 @@ def _content_check(title: str, description: str, tags: list) -> str:
 
 
 def _tokenize_text(text: str) -> set:
+    """Tokenize text into a set of lowercase words. Args: text: Input string. Returns: Set of token strings."""
     tokens = _re_mod.findall(r"[a-z0-9]{3,}", (text or "").lower())
     return set(tokens)
 
 
 def _jaccard(a: set, b: set) -> float:
+    """Compute Jaccard similarity between two sets. Args: a: First set. b: Second set. Returns: Similarity score 0.0-1.0."""
     if not a and not b:
         return 0.0
     return len(a & b) / max(1, len(a | b))
@@ -508,6 +519,7 @@ def _normalize_ref_code(raw: str) -> str:
 
 
 def _normalize_referral_track(raw: str, default: str = "both") -> str:
+    """Normalize a referral track string to a known value. Args: raw: Input track string. default: Fallback if unrecognized. Returns: Normalized track string."""
     track = (raw or "").strip().lower()
     if track in REFERRAL_TRACKS:
         return track
@@ -515,12 +527,14 @@ def _normalize_referral_track(raw: str, default: str = "both") -> str:
 
 
 def _referral_track_for_agent(row: sqlite3.Row | dict | None) -> str:
+    """Extract referral track for an agent from a database row or dict. Returns: Track string or default."""
     if not row:
         return "agent"
     return "human" if int(row["is_human"] or 0) else "agent"
 
 
 def _referral_track_allowed(allowed_track: str, invitee_track: str) -> bool:
+    """Check if an invitee track is allowed by the referrer track policy. Returns: True if allowed."""
     allowed = _normalize_referral_track(allowed_track, "both")
     if allowed == "both":
         return True
@@ -528,6 +542,7 @@ def _referral_track_allowed(allowed_track: str, invitee_track: str) -> bool:
 
 
 def _referral_request_hashes() -> tuple[str, str]:
+    """Extract referral code and invite hash from the current request. Returns: Tuple of (code, hash) strings."""
     try:
         ip = _get_client_ip()
         fp = _fingerprint_ua(
@@ -544,6 +559,7 @@ def _referral_request_hashes() -> tuple[str, str]:
 
 
 def _referral_get_code_row(db: sqlite3.Connection, code: str):
+    """Look up a referral code in the database. Returns: Row if found, None otherwise."""
     ref_code = _normalize_ref_code(code)
     if not ref_code:
         return None
@@ -554,6 +570,7 @@ def _referral_get_code_row(db: sqlite3.Connection, code: str):
 
 
 def _referral_build_summary(db: sqlite3.Connection, agent_id: int, *, include_recent: bool = True) -> dict | None:
+    """Build a summary of referral activity for an agent. Args: db: DB connection. agent_id: Agent ID. Returns: Dict with referral stats."""
     row = db.execute(
         """
         SELECT code, hits, signups, first_uploads, created_at, COALESCE(allowed_track, 'both') AS allowed_track
@@ -693,6 +710,7 @@ def _referral_build_summary(db: sqlite3.Connection, agent_id: int, *, include_re
 
 
 def _referral_refresh_invite_state(db: sqlite3.Connection, invitee_agent_id: int) -> None:
+    """Refresh the invite state for a referral invitee. Checks if invitee has met requirements and updates status."""
     invite = db.execute(
         """
         SELECT
@@ -779,6 +797,7 @@ def _referral_mark_rtc_native_action(
     evidence_ref: str,
     occurred_at: float | None = None,
 ) -> None:
+    """Mark a referral RTC native action as completed for an invitee. Records the action in the referral tracking system."""
     invite = db.execute(
         "SELECT first_rtc_native_action_at FROM referral_invites WHERE invitee_agent_id = ?",
         (agent_id,),
@@ -984,6 +1003,7 @@ def _referral_mark_first_upload(db, agent_id: int):
     except Exception:
         pass
 def _badge_catalog_entry(badge_key: str) -> dict:
+    """Get a badge catalog entry by key. Returns: Dict with badge metadata."""
     meta = dict(BADGE_CATALOG.get(badge_key, {}))
     label = meta.get("label") or badge_key.replace("_", " ").title()
     context_label = meta.get("context_label") or "Founding"
@@ -1001,6 +1021,7 @@ def _badge_catalog_entry(badge_key: str) -> dict:
 
 
 def _default_badge_source_campaign(badge_key: str) -> str:
+    """Get default campaign name for a badge key. Returns: Campaign string."""
     if "_human_" in badge_key or badge_key.endswith("_human"):
         return "rustchain-bounties#1584"
     if "_agent_" in badge_key or badge_key.endswith("_agent"):
@@ -1009,6 +1030,7 @@ def _default_badge_source_campaign(badge_key: str) -> str:
 
 
 def _badge_assignment_payload(row) -> dict:
+    """Build the API payload for a badge assignment from a database row. Returns: Dict with badge assignment data."""
     meta = _badge_catalog_entry((row["badge_key"] or "").strip())
     payload = {
         "id": int(row["id"]),
@@ -1041,6 +1063,7 @@ def _badge_assignment_payload(row) -> dict:
 
 
 def _badge_payload_sort_key(badge: dict) -> tuple:
+    """Sort key function for badges by rarity then date. Returns: Sortable tuple."""
     cohort = int(badge.get("cohort_number") or 0)
     cohort_sort = cohort if cohort > 0 else 9999
     return (
@@ -1057,6 +1080,7 @@ def _list_agent_badges(
     *,
     include_inactive: bool = False,
 ) -> list[dict]:
+    """List all badges assigned to an agent. Args: db: DB connection. Returns: List of badge dicts sorted by rarity."""
     where = "" if include_inactive else "AND COALESCE(is_active, 1) = 1"
     rows = db.execute(
         f"""
@@ -1073,12 +1097,14 @@ def _list_agent_badges(
 
 
 def _badge_assignment_keyset(db: sqlite3.Connection, *, active_only: bool = True) -> set[tuple[int, str]]:
+    """Get the set of badge assignment keys for deduplication. Args: active_only: If True, only return active badges. Returns: Set of assignment key strings."""
     where = "WHERE COALESCE(is_active, 1) = 1" if active_only else ""
     rows = db.execute(f"SELECT agent_id, badge_key FROM agent_badges {where}").fetchall()
     return {(int(row["agent_id"]), row["badge_key"]) for row in rows}
 
 
 def _build_badge_candidates(db: sqlite3.Connection) -> list[dict]:
+    """Build the list of badge candidates eligible for assignment. Returns: List of badge candidate dicts."""
     assigned = _badge_assignment_keyset(db, active_only=True)
     candidates: list[dict] = []
 
@@ -1402,6 +1428,7 @@ app.jinja_env.globals["language_switch_href"] = _language_switch_href
 
 
 def _build_recovery_notice(db=None):
+    """Build a recovery notice message for display. Args: db: Optional DB connection. Returns: Notice dict or None."""
     if not RECOVERY_RECLAIM_ENABLED:
         return None
     restored_views = RECOVERY_RESTORED_VIEWS_FALLBACK
@@ -1427,6 +1454,7 @@ def _build_recovery_notice(db=None):
 
 @app.context_processor
 def inject_recovery_notice():
+    """Inject a recovery notice into the template context if one exists."""
     notice = None
     if RECOVERY_RECLAIM_ENABLED:
         try:
@@ -1560,6 +1588,7 @@ def _verify_csrf():
 
 
 def _public_json_object_body():
+    """Parse and validate the JSON request body as a dict. Returns: Tuple of (data_dict, error_response)."""
     data = request.get_json(silent=True)
     if data is None:
         return {}, None
@@ -1569,6 +1598,7 @@ def _public_json_object_body():
 
 
 def _public_string_field(data, field, default="", max_length=None):
+    """Extract and validate a string field from JSON data. Args: data: Dict to extract from. field: Key name. default: Fallback value. max_length: Optional length cap. Returns: Tuple of (value, error_string)."""
     value = data.get(field, default)
     if value is None:
         value = default
@@ -2156,6 +2186,7 @@ def get_db():
 
 @app.teardown_appcontext
 def close_db(exc):
+    """Close the database connection on app teardown. Args: exc: Exception from teardown context."""
     db = g.pop("db", None)
     if db is not None:
         db.close()
@@ -2990,6 +3021,7 @@ def _refresh_agent_quests(
     agent_id: int,
     quest_keys: Optional[List[str]] = None,
 ) -> List[Dict]:
+    """Refresh quest progress for an agent. Checks all active quests and updates completion state."""
     """Refresh quest progress, award one-time RTC, and return quest snapshots."""
     params: list = []
     where = "WHERE is_active = 1"
@@ -3112,6 +3144,7 @@ def _handle_onchain_tip(
     video_id: str = "",
     video_title: str = "",
 ):
+    """Handle an on-chain tip transaction. Records the tip and triggers any associated reward logic."""
     """Validate + forward a RustChain signed transfer, then record as a pending tip."""
     required = ["from_address", "to_address", "nonce", "signature", "public_key", "memo"]
     missing = [k for k in required if not (data or {}).get(k)]
@@ -3227,6 +3260,7 @@ INDEXNOW_KEY = "bottube64db02b03f2d3732"
 def _ping_indexnow(url):
     """Fire-and-forget IndexNow ping to notify search engines of a new URL."""
     def _do_ping():
+        """Handle a health-check ping. Returns: Pong response."""
         try:
             payload = json.dumps({
                 "host": "bottube.ai",
@@ -3268,6 +3302,44 @@ def award_rtc(db, agent_id: int, amount: float, reason: str, video_id: str = "",
     )
 
 
+def debit_rtc(db: sqlite3.Connection, agent_id: int, amount: float) -> bool:
+    """Atomically debit RTC from an agent. Returns True only if it went through.
+
+    The counterpart to :func:`award_rtc`. Every spend path must go through
+    this rather than issuing a bare ``rtc_balance = rtc_balance - ?``.
+
+    A bare subtract preceded by a ``SELECT rtc_balance`` check is a TOCTOU race:
+    the check and the write are two statements, so two concurrent tips can both
+    read the same balance, both decide it is sufficient, and both subtract --
+    leaving the sender negative and crediting recipients with RTC that was
+    never funded. Because the tip handlers credit the *recipient* right after
+    debiting the sender, an unguarded debit does not merely overdraw one
+    account, it mints supply.
+
+    Putting the comparison in the UPDATE's WHERE clause makes the read and the
+    write a single atomic statement. ``rowcount == 0`` means the funds were not
+    there at the instant of the write, and the caller must abort before issuing
+    any matching credit.
+    """
+    cur = db.execute(
+        "UPDATE agents SET rtc_balance = rtc_balance - ? "
+        "WHERE id = ? AND rtc_balance >= ?",
+        (amount, agent_id, amount),
+    )
+    return cur.rowcount > 0
+
+
+def _insufficient_balance_response(db: sqlite3.Connection, agent_id: int):
+    """Standard 400 for a debit that lost its race (or was never funded)."""
+    row = db.execute(
+        "SELECT rtc_balance FROM agents WHERE id = ?", (agent_id,)
+    ).fetchone()
+    return jsonify({
+        "error": "Insufficient RTC balance",
+        "balance": row["rtc_balance"] if row else 0,
+    }), 400
+
+
 def _queue_reward_hold(
     db: sqlite3.Connection,
     *,
@@ -3278,6 +3350,7 @@ def _queue_reward_hold(
     risk_score: int,
     reasons: list[str],
 ) -> None:
+    """Queue a reward hold for later review. Stores the hold with metadata for manual or automated review."""
     """Persist a suspicious reward instead of paying it immediately."""
     db.execute(
         """
@@ -4249,6 +4322,7 @@ def video_to_dict(row):
     """
     d = dict(row)
     d.pop("id", None)
+    d.pop("screening_details", None)  # internal, not for public API (#1587)
     d["tags"] = json.loads(d.get("tags", "[]"))
     d["url"] = f"/api/videos/{d['video_id']}/stream"
     d["watch_url"] = f"/watch/{d['video_id']}"
@@ -4550,6 +4624,7 @@ app.jinja_env.filters["format_views"] = format_views
 app.jinja_env.filters["time_ago"] = time_ago
 
 def minimal_markdown(text):
+    """Convert minimal Markdown subset to safe HTML. Supports bold, italic, code spans, links, line breaks. All other syntax is escaped. Args: text: Input Markdown string. Returns: Safe HTML string."""
     if not text:
         return ""
     import html, re
@@ -5396,6 +5471,7 @@ def referral_me_user():
 
 
 def _referral_apply_payload(source: str):
+    """Apply a referral code from the request body. Args: source: Signup source label. Returns: JSON response."""
     db = get_db()
     json_data = request.get_json(silent=True)
     if json_data is not None and not isinstance(json_data, dict):
@@ -5427,6 +5503,7 @@ def referral_apply_user():
 
 
 def _get_referral_leaderboard(db, limit: int = 50) -> list[dict]:
+    """Get the referral leaderboard ranked by successful referrals. Args: limit: Max entries. Returns: List of agent referral stats."""
     limit = max(1, min(int(limit or 50), 200))
     rows = db.execute(
         """
@@ -5682,6 +5759,7 @@ def founding_page():
 
 @app.route("/api/referrals/leaderboard")
 def referrals_leaderboard_api():
+    """API endpoint for referral leaderboard data. Returns: JSON list of top referrers."""
     db = get_db()
     limit_i, error = _parse_positive_int_query("limit", 50, max_value=200)
     if error:
@@ -5696,6 +5774,7 @@ def founding_leaderboard_api():
 
 
 def _referral_admin_notes(db: sqlite3.Connection, row: sqlite3.Row) -> list[str]:
+    """Build admin notes for a referral record. Returns: List of note strings for admin review."""
     notes: list[str] = []
     signup_ip_hash = (row["signup_ip_hash"] or "").strip()
     signup_fp_hash = (row["signup_fp_hash"] or "").strip()
@@ -5731,6 +5810,7 @@ def _referral_admin_notes(db: sqlite3.Connection, row: sqlite3.Row) -> list[str]
 
 
 def _referral_admin_payload(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    """Build the admin payload for a referral record. Returns: Dict with referral details for admin UI."""
     invitee_created_at = float(row["invitee_created_at"] or 0)
     return {
         "id": int(row["id"]),
@@ -6997,33 +7077,13 @@ def _parse_positive_int_query(name, default, min_value=1, max_value=None, *, cla
     silently coercing invalid input to the default (which would mask
     client bugs and could lead to surprising pagination/sort results).
     """
-    raw_value = request.args.get(name)
-    if raw_value is None or raw_value == "":
-        return default, None
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError):
-        return None, (
-            jsonify({"error": f"{name} must be an integer"}),
-            400,
-        )
-    if clamp_bounds:
-        if value < min_value:
-            value = min_value
-        if max_value is not None and value > max_value:
-            value = max_value
-        return value, None
-    if value < min_value:
-        return None, (
-            jsonify({"error": f"{name} must be >= {min_value}"}),
-            400,
-        )
-    if max_value is not None and value > max_value:
-        return None, (
-            jsonify({"error": f"{name} must be <= {max_value}"}),
-            400,
-        )
-    return value, None
+    return parse_int_param(
+        name,
+        default,
+        min_value=min_value,
+        max_value=max_value,
+        clamp_bounds=clamp_bounds,
+    )
 
 
 def _client_has_fresh_video_list_date(latest_ts: float) -> bool:
@@ -7069,7 +7129,7 @@ def list_videos():
     # affect any legitimate use case. Bottube issue #1414 (page-bound
     # follow-up; the live `bottube.ai` binary is v1.2.0 and still lets
     # `page=99999` through with `videos=[]`).
-    page, error = _parse_positive_int_query("page", 1, max_value=10000)
+    page, error = parse_int_param("page", 1, min_value=1, max_value=10000)
     if error:
         return error
 
@@ -7283,6 +7343,47 @@ def get_video(video_id):
 # Agent Mood API (Bounty #2283)
 # ---------------------------------------------------------------------------
 
+
+def _authorize_mood_write(agent_name):
+    """Resolve the mood target named in the URL and authorize the caller.
+
+    ``require_api_key`` only *authenticates*: it proves the caller holds some
+    valid key and stashes that row on ``g.agent``. It never inspects the
+    ``agent_name`` path parameter, and the mood handlers used to re-resolve the
+    target straight from the URL while ignoring ``g.agent`` entirely. The result
+    was horizontal privilege escalation -- any valid API key could write any
+    other agent's mood. PR #1639 closed the *anonymous* hole (no key at all);
+    this closes the *cross-agent* one.
+
+    Authorization is deliberately positive: the caller must either own the
+    target agent, or present an explicit operator admin key. "Holds a valid
+    key" is not sufficient.
+
+    Returns ``(agent_row, None)`` when the write may proceed, otherwise
+    ``(None, (response, status))`` for the handler to return.
+    """
+    db = get_db()
+    agent = db.execute(
+        "SELECT id, agent_name FROM agents WHERE agent_name = ?",
+        (agent_name,),
+    ).fetchone()
+    if not agent:
+        return None, (jsonify({"error": "Agent not found"}), 404)
+
+    caller = getattr(g, "agent", None)
+    if caller is not None and caller["id"] == agent["id"]:
+        return agent, None
+
+    # Explicit operator permission is the only cross-agent escape hatch.
+    if _require_admin() is None:
+        return agent, None
+
+    return None, (jsonify({
+        "error": "Forbidden - your API key does not own this agent",
+        "hint": "Write mood only for your own agent, or supply an admin key.",
+    }), 403)
+
+
 @app.route("/api/v1/agents/<agent_name>/mood", methods=["GET"])
 def get_agent_mood(agent_name):
     """
@@ -7322,6 +7423,7 @@ def get_agent_mood(agent_name):
 
 
 @app.route("/api/v1/agents/<agent_name>/mood/update", methods=["POST"])
+@require_api_key
 def update_agent_mood(agent_name):
     """
     Update mood for an agent based on signals.
@@ -7332,18 +7434,11 @@ def update_agent_mood(agent_name):
     """
     if not MOOD_ENGINE_AVAILABLE:
         return jsonify({"error": "Mood engine not available"}), 503
-    
-    db = get_db()
-    
-    # Get agent by name
-    agent = db.execute(
-        "SELECT id, agent_name FROM agents WHERE agent_name = ?",
-        (agent_name,)
-    ).fetchone()
-    
-    if not agent:
-        return jsonify({"error": "Agent not found"}), 404
-    
+
+    agent, err = _authorize_mood_write(agent_name)
+    if err:
+        return err
+
     data = request.get_json() or {}
     force_state = data.get("force_state")
     trigger_reason = data.get("trigger_reason", "")
@@ -7354,6 +7449,7 @@ def update_agent_mood(agent_name):
 
 
 @app.route("/api/v1/agents/<agent_name>/mood/signal", methods=["POST"])
+@require_api_key
 def record_mood_signal(agent_name):
     """
     Record a signal that influences agent mood.
@@ -7365,18 +7461,11 @@ def record_mood_signal(agent_name):
     """
     if not MOOD_ENGINE_AVAILABLE:
         return jsonify({"error": "Mood engine not available"}), 503
-    
-    db = get_db()
-    
-    # Get agent by name
-    agent = db.execute(
-        "SELECT id, agent_name FROM agents WHERE agent_name = ?",
-        (agent_name,)
-    ).fetchone()
-    
-    if not agent:
-        return jsonify({"error": "Agent not found"}), 404
-    
+
+    agent, err = _authorize_mood_write(agent_name)
+    if err:
+        return err
+
     data = request.get_json() or {}
     signal_type = data.get("signal_type")
     signal_value = data.get("signal_value")
@@ -7544,7 +7633,7 @@ def record_view(video_id):
         if agent:
             agent_id = agent["id"]
 
-    ip = request.headers.get("X-Real-IP", request.remote_addr)
+    ip = _get_client_ip()
     VIEW_COOLDOWN = 1800  # 30 minutes
     recent = db.execute(
         "SELECT 1 FROM views WHERE video_id = ? AND ip_address = ? AND created_at > ?",
@@ -9265,7 +9354,7 @@ def trending():
                  after this time. Mutually exclusive with days.
       category – filter by video category
     """
-    limit, err = _parse_positive_int_query("limit", 20, max_value=50)
+    limit, err = parse_int_param("limit", 20, min_value=1, max_value=50)
     if err:
         return err
 
@@ -9279,12 +9368,12 @@ def trending():
         return jsonify({"error": "days and since are mutually exclusive"}), 400
 
     if raw_days is not None and raw_days != "":
-        days, err = _parse_positive_int_query("days", 1, max_value=90)
+        days, err = parse_int_param("days", 1, min_value=1, max_value=90)
         if err:
             return err
 
     if raw_since is not None and raw_since != "":
-        since, err = _parse_positive_int_query("since", 0, min_value=0)
+        since, err = parse_ts_param("since", 0)
         if err:
             return err
 
@@ -9310,12 +9399,18 @@ def trending():
 
 _FEED_BUCKETS = ("latest", "heuristic", "hybrid-v1")
 _FEED_MODES = ("latest", "recommended")
+_FEED_SORTS = (
+    "latest",
+    "newest",
+    "oldest",
+    "popular",
+    "trending",
+    "views",
+    "likes",
+    "title",
+)
 _FEED_CATEGORY_IDS = {c["id"] for c in VIDEO_CATEGORIES}
-
-
-def _feed_choice_error(name, allowed):
-    allowed_text = ", ".join(sorted(allowed))
-    return jsonify({"error": f"{name} must be one of: {allowed_text}"}), 400
+_FEED_MAX_OFFSET = 500_000
 
 
 def _feed_bucket_for_visitor(visitor_id, override=""):
@@ -9776,6 +9871,9 @@ def _feed_event_impression_id(data):
 @app.route("/api/feed/click", methods=["POST"])
 def api_feed_click():
     """Record a click on a feed impression."""
+    ip = _get_client_ip()
+    if not _rate_limit(f"feed_click:{ip}", 30, 60):
+        return jsonify({"ok": False, "error": "rate limited"}), 429
     _feed_imp_ensure_schema()
     data, error = _feed_event_json_body()
     if error:
@@ -9887,6 +9985,31 @@ def feed():
     Returns:
         JSON with videos list, page info, mode used, and the active bucket.
     """
+    # Validate compatibility parameters reported in #1456 even though the
+    # current feed implementation still pages with `page`/`per_page`.  Valid
+    # compatibility values remain no-ops, preserving the current response,
+    # while malformed values can no longer be silently ignored.
+    _, error = parse_int_param("limit", None, min_value=1, max_value=50)
+    if error:
+        return error
+    _, error = parse_int_param("offset", None, min_value=0, max_value=_FEED_MAX_OFFSET)
+    if error:
+        return error
+    _, error = parse_ts_param("since", None, max_value=MAX_QUERY_TIMESTAMP)
+    if error:
+        return error
+    _, error = parse_ts_param("before", None, max_value=MAX_QUERY_TIMESTAMP)
+    if error:
+        return error
+    _, error = parse_enum_param(
+        "sort",
+        None,
+        _FEED_SORTS,
+        case_sensitive=False,
+    )
+    if error:
+        return error
+
     # `page` is bounded at 10000 so a malformed or malicious client cannot
     # request an arbitrarily deep page. Without an upper bound, a value such
     # as `page=9223372036854775807` makes `offset = (page - 1) * per_page`
@@ -9896,26 +10019,35 @@ def feed():
     # ~500k rows, already well past the whole feed catalogue, so the cap does
     # not affect any legitimate use case. Mirrors the `/api/videos` bound
     # (Bottube issue #1414).
-    page, error = _parse_positive_int_query("page", 1, max_value=10000)
+    page, error = parse_int_param("page", 1, min_value=1, max_value=10000)
     if error:
         return error
-    per_page, error = _parse_positive_int_query("per_page", 20, max_value=50)
+    per_page, error = parse_int_param("per_page", 20, min_value=1, max_value=50)
     if error:
         return error
-    mode = request.args.get("mode", "latest")
-    category = request.args.get("category")
-    bucket_override = (request.args.get("bucket") or "").strip().lower()
-    mode = (mode or "latest").strip().lower()
-    if mode not in _FEED_MODES:
-        return _feed_choice_error("mode", _FEED_MODES)
-    if category is not None:
-        category = category.strip()
-        if not category:
-            category = None
-        elif category not in _FEED_CATEGORY_IDS:
-            return _feed_choice_error("category", _FEED_CATEGORY_IDS)
-    if bucket_override and bucket_override not in _FEED_BUCKETS:
-        return _feed_choice_error("bucket", _FEED_BUCKETS)
+    mode, error = parse_enum_param(
+        "mode",
+        "latest",
+        _FEED_MODES,
+        case_sensitive=False,
+    )
+    if error:
+        return error
+    category, error = parse_enum_param(
+        "category",
+        None,
+        _FEED_CATEGORY_IDS,
+    )
+    if error:
+        return error
+    bucket_override, error = parse_enum_param(
+        "bucket",
+        "",
+        _FEED_BUCKETS,
+        case_sensitive=False,
+    )
+    if error:
+        return error
 
     # Get optional API key for personalized recommendations
     api_key = request.headers.get("X-API-Key") or request.args.get("api_key")
@@ -11646,7 +11778,11 @@ def tip_video(video_id):
     else:
         per_recipient = amount
         diff = 0
-    db.execute("UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?", (amount, g.agent["id"]))
+    # Guarded debit MUST succeed before any recipient is credited -- otherwise
+    # a lost race credits collaborators with RTC the sender never had.
+    if not debit_rtc(db, g.agent["id"], amount):
+        db.rollback()
+        return _insufficient_balance_response(db, g.agent["id"])
     for idx, (rid, role) in enumerate(recipients):
         share = per_recipient + (diff if idx == 0 else 0)
         db.execute("UPDATE agents SET rtc_balance = rtc_balance + ? WHERE id = ?", (share, rid))
@@ -11743,8 +11879,10 @@ def web_tip_video(video_id):
     if sender["rtc_balance"] < amount:
         return jsonify({"error": "Insufficient RTC balance", "balance": sender["rtc_balance"]}), 400
 
-    # Execute transfer
-    db.execute("UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?", (amount, g.user["id"]))
+    # Execute transfer -- debit first, and only credit if the debit was funded.
+    if not debit_rtc(db, g.user["id"], amount):
+        db.rollback()
+        return _insufficient_balance_response(db, g.user["id"])
     db.execute("UPDATE agents SET rtc_balance = rtc_balance + ? WHERE id = ?", (amount, video["agent_id"]))
 
     db.execute(
@@ -11836,7 +11974,9 @@ def web_tip_agent(agent_name):
     if sender["rtc_balance"] < amount:
         return jsonify({"error": "Insufficient RTC balance", "balance": sender["rtc_balance"]}), 400
 
-    db.execute("UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?", (amount, g.user["id"]))
+    if not debit_rtc(db, g.user["id"], amount):
+        db.rollback()
+        return _insufficient_balance_response(db, g.user["id"])
     db.execute("UPDATE agents SET rtc_balance = rtc_balance + ? WHERE id = ?", (amount, target["id"]))
     db.execute(
         "INSERT INTO tips (from_agent_id, to_agent_id, video_id, amount, message, created_at) "
@@ -11921,7 +12061,9 @@ def tip_agent(agent_name):
     if sender["rtc_balance"] < amount:
         return jsonify({"error": "Insufficient RTC balance", "balance": sender["rtc_balance"]}), 400
 
-    db.execute("UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?", (amount, g.agent["id"]))
+    if not debit_rtc(db, g.agent["id"], amount):
+        db.rollback()
+        return _insufficient_balance_response(db, g.agent["id"])
     db.execute("UPDATE agents SET rtc_balance = rtc_balance + ? WHERE id = ?", (amount, target["id"]))
     db.execute(
         "INSERT INTO tips (from_agent_id, to_agent_id, video_id, amount, message, created_at) "
@@ -12523,7 +12665,7 @@ def watch(video_id):
         abort(404)
 
     # Record view (deduplicated: 1 view per IP per video per 30 min)
-    ip = request.headers.get("X-Real-IP", request.remote_addr)
+    ip = _get_client_ip()
     VIEW_COOLDOWN = 1800  # 30 minutes
     recent = db.execute(
         "SELECT 1 FROM views WHERE video_id = ? AND ip_address = ? AND created_at > ?",
@@ -13175,16 +13317,6 @@ def developers_page():
 def api_redirect():
     """Redirect /api to the API documentation page."""
     return redirect(url_for("docs_page"))
-
-
-@app.route("/bridge")
-def bridge_page():
-    """wRTC bridge landing page with safe defaults for unauthenticated users."""
-    return render_template("bridge.html",
-        user_balance=0.0,
-        swap_url="https://jup.ag/",
-        reserve_wallet="Not connected — log in to view",
-        user_sol_address="")
 
 
 @app.route("/docs")
@@ -14586,7 +14718,7 @@ def api_track_miner_install():
     page, field_error = _public_string_field(data, "page", "unknown", 128)
     if field_error:
         return jsonify({"ok": False, "error": field_error}), 400
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = _get_client_ip()
     app.logger.info(f"[MINER-TRACK] source={source} page={page} ip={ip}")
 
     db = get_db()
@@ -17153,6 +17285,10 @@ def api_history_clear():
 @app.route("/api/videos/<video_id>/related")
 def api_related_videos(video_id):
     """Get related videos for a given video ID."""
+    limit, error = parse_int_param("limit", 8, min_value=1, max_value=20)
+    if error:
+        return error
+
     db = get_db()
     video = db.execute(
         f"""SELECT v.*
@@ -17193,19 +17329,6 @@ def api_related_videos(video_id):
         return s
 
     scored = sorted(candidates, key=score, reverse=True)
-    raw_limit = request.args.get("limit")
-    if raw_limit is None or raw_limit == "":
-        limit = 8
-    else:
-        try:
-            limit = int(raw_limit)
-        except (TypeError, ValueError):
-            return jsonify({"error": "limit must be an integer"}), 400
-        if limit < 1:
-            return jsonify({"error": "limit must be >= 1"}), 400
-        if limit > 20:
-            return jsonify({"error": "limit must be <= 20"}), 400
-
     return jsonify({
         "ok": True,
         "related": [
@@ -18261,6 +18384,10 @@ def record_watch_time(video_id):
 
     Body: {"seconds": 12.5}
     """
+    ip = _get_client_ip()
+    if not _rate_limit(f"watch_time:{ip}", 60, 60):
+        return jsonify({"ok": False, "error": "rate limited"}), 429
+
     data = request.get_json(silent=True)
     if data is None:
         data = {}
@@ -20382,6 +20509,7 @@ def submit_report():
 # --- Admin endpoints ------------------------------------------------------
 
 def _ts_admin_ok():
+    """Check if the current request has admin privileges for trust-and-safety endpoints. Returns: True if admin."""
     key = request.headers.get("X-Admin-Key", "") or request.args.get("admin_key", "")
     expected = os.environ.get("BOTTUBE_ADMIN_KEY", "") or os.environ.get("RC_ADMIN_KEY", "")
     return bool(expected) and (key == expected)

@@ -212,29 +212,43 @@ def get_platform_erg_balance():
 # ---------------------------------------------------------------------------
 
 def _award_rtc(db, agent_id, amount, reason):
-    """Credit RTC to an agent's balance."""
+    """Credit RTC to an agent's balance.
+
+    The ledger column is ``earnings.reason`` (see the schema in
+    bottube_server.py and every other writer: wrtc_bridge.py,
+    paypal_packages.py, rtc_services.py). Writing ``source`` here raised
+    ``OperationalError: table earnings has no column named source`` on
+    every call, which aborted the credit.
+    """
     db.execute(
         "UPDATE agents SET rtc_balance = rtc_balance + ? WHERE id = ?",
         (amount, agent_id),
     )
     db.execute(
-        "INSERT INTO earnings (agent_id, amount, source, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO earnings (agent_id, amount, reason, created_at) VALUES (?, ?, ?, ?)",
         (agent_id, amount, reason, time.time()),
     )
     db.commit()
 
 
 def _debit_rtc(db, agent_id, amount):
-    """Debit RTC from an agent's balance. Returns True if sufficient funds."""
-    row = db.execute(
-        "SELECT rtc_balance FROM agents WHERE id = ?", (agent_id,)
-    ).fetchone()
-    if not row or row["rtc_balance"] < amount:
-        return False
-    db.execute(
-        "UPDATE agents SET rtc_balance = rtc_balance - ? WHERE id = ?",
-        (amount, agent_id),
+    """Atomically debit RTC from an agent's balance.
+
+    Returns True if the debit succeeded (sufficient funds), False otherwise.
+
+    Fixes a TOCTOU race: the previous check-then-update used two separate
+    statements, so two concurrent withdrawals could both read the same balance,
+    both pass the check, and both subtract -- overdrawing the account. The
+    comparison now lives in the UPDATE's WHERE clause, making read and write a
+    single atomic statement; ``rowcount == 0`` means the funds were not there.
+    """
+    cursor = db.execute(
+        "UPDATE agents SET rtc_balance = rtc_balance - ? "
+        "WHERE id = ? AND rtc_balance >= ?",
+        (amount, agent_id, amount),
     )
+    if cursor.rowcount == 0:
+        return False
     db.commit()
     return True
 
@@ -244,6 +258,11 @@ def _debit_rtc(db, agent_id, amount):
 # ---------------------------------------------------------------------------
 
 def _request_json_object():
+    """Parse and return a JSON object from the request body.
+    
+    Returns:
+        The result value.
+    """
     data = request.get_json(silent=True)
     if data is None:
         data = {}
@@ -253,6 +272,15 @@ def _request_json_object():
 
 
 def _string_field(data, field_name):
+    """Extract a field from the request.
+    
+    Args:
+        data: Parameter value.
+        field_name: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     value = data.get(field_name, "")
     if not isinstance(value, str):
         return None, (jsonify({"error": f"{field_name} must be a string"}), 400)
@@ -260,6 +288,14 @@ def _string_field(data, field_name):
 
 
 def _positive_finite_amount(value):
+    """Parse and validate a positive finite amount from the request.
+    
+    Args:
+        value: Parameter value.
+    
+    Returns:
+        The result value.
+    """
     if isinstance(value, bool):
         return None
     try:
@@ -385,9 +421,11 @@ def ergo_deposit():
         (tx_id, result["from_address"], amount_erg, fee_erg, net_erg,
          rtc_amount, agent_id, confirmations, time.time(), time.time()),
     )
-    db.commit()
 
-    # Credit RTC
+    # Credit RTC. No commit above on purpose: the deposit row and the RTC
+    # credit have to land in the SAME transaction. Committing the
+    # 'credited' row first meant that any failure in _award_rtc left the
+    # tx_id permanently claimed (409 on every retry) with 0 RTC issued.
     _award_rtc(db, agent_id, rtc_amount, f"ergo_deposit:{tx_id[:16]}")
 
     return jsonify({

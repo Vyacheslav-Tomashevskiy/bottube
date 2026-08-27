@@ -23,6 +23,8 @@ import time
 import hashlib
 import shutil
 
+from client_ip import resolve_client_ip
+
 gemini_bp = Blueprint("gemini", __name__)
 log = logging.getLogger("gemini")
 
@@ -692,12 +694,17 @@ FREE_IMAGE_PER_DAY = 10   # Max 10 free image gens per IP per day
 GUEST_AGENT_ID = 0         # Virtual agent ID for guest users
 
 _ip_rate_buckets = {}
+_MAX_IP_BUCKETS = 20000  # bound the dict; entries expire after 24h anyway
 
 
 def _check_ip_rate(ip, job_type, max_per_day):
     """IP-based rate limiter for free tier."""
     key = f"free:{job_type}:{ip}"
     now = time.time()
+    if len(_ip_rate_buckets) > _MAX_IP_BUCKETS:
+        for stale in [k for k, v in _ip_rate_buckets.items()
+                      if not v or v[-1] <= now - 86400]:
+            _ip_rate_buckets.pop(stale, None)
     bucket = _ip_rate_buckets.get(key, [])
     bucket = [t for t in bucket if t > now - 86400]
     if len(bucket) >= max_per_day:
@@ -708,11 +715,13 @@ def _check_ip_rate(ip, job_type, max_per_day):
 
 
 def _get_client_ip():
-    """Get real client IP, respecting X-Forwarded-For behind nginx."""
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.remote_addr or "unknown"
+    """Get real client IP, honouring X-Forwarded-For only from a trusted proxy.
+
+    The free tier below is unauthenticated: the per-IP quota is the only thing
+    between an anonymous caller and a billed Veo/Imagen job, so the IP must not
+    be taken from a header the caller controls.
+    """
+    return resolve_client_ip()
 
 
 @gemini_bp.route("/api/gemini/free/generate-video", methods=["POST"])
